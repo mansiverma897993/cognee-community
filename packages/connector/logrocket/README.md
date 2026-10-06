@@ -57,8 +57,11 @@ the live MCP schema.
 
 Keep LogRocket in a dedicated Cognee dataset. The selected date/filter scope is an
 authoritative snapshot: records that disappear from that scope on a successful sync
-are eligible for Cognee's existing orphan cleanup. A failed or partial MCP response
-aborts the run and does not advance any source state or trigger cleanup.
+are eligible for Cognee's existing orphan cleanup. An MCP error or a response
+that explicitly reports more pages without a cursor aborts the run. The MCP API
+does not currently document a complete export or deletion feed, so do not treat
+this snapshot behavior as verified forget-on-delete until tested with a real
+LogRocket project.
 
 ## Example
 

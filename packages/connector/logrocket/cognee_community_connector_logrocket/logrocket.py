@@ -127,6 +127,10 @@ class LogRocketMCPClient:
 
             next_cursor = _next_cursor(payload)
             if not next_cursor:
+                if _has_more(payload):
+                    raise LogRocketMCPError(
+                        f"LogRocket {tool_name} reported more records without a pagination cursor."
+                    )
                 return
             if not cursor_key:
                 raise LogRocketMCPError(
@@ -407,6 +411,12 @@ def _next_cursor(payload: Any) -> str | None:
         if value not in (None, ""):
             return str(value)
     return None
+
+
+def _has_more(payload: Any) -> bool:
+    return isinstance(payload, Mapping) and any(
+        payload.get(key) is True for key in ("hasMore", "has_more", "hasNext", "has_next")
+    )
 
 
 def _cursor_argument(tool: Mapping[str, Any]) -> str | None:

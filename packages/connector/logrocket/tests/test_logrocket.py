@@ -194,6 +194,23 @@ def test_mcp_tool_error_is_raised():
         list(client.iter_tool_records("find_sessions", {}, ("sessions",)))
 
 
+def test_incomplete_page_without_cursor_fails():
+    client = LogRocketMCPClient("secret")
+    client._initialized = True
+    client._tools = {
+        "find_sessions": {
+            "name": "find_sessions",
+            "inputSchema": {"properties": {"cursor": {}}},
+        }
+    }
+    client._request = lambda *args, **kwargs: {
+        "structuredContent": {"sessions": [{"id": "s1"}], "hasMore": True}
+    }
+
+    with pytest.raises(LogRocketMCPError, match="without a pagination cursor"):
+        list(client.iter_tool_records("find_sessions", {}, ("sessions",)))
+
+
 def test_time_window_uses_schema_advertised_millisecond_fields():
     arguments = {}
     tool = {"name": "find_sessions", "inputSchema": {"properties": {"startMs": {}, "endMs": {}}}}
