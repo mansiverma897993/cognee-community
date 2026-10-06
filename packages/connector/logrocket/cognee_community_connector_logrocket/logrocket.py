@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from cognee.shared.logging_utils import get_logger
@@ -89,12 +90,8 @@ class LogRocketMCPClient:
         }
         self._initialized = True
 
-    def iter_tool_records(
-        self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-        record_keys: tuple[str, ...],
-    ) -> Iterator[dict[str, Any]]:
+    def tool_schema(self, tool_name: str) -> Mapping[str, Any]:
+        """Return the advertised input schema, or fail before starting a sync."""
         self.initialize()
         tool = self._tools.get(tool_name)
         if tool is None:
@@ -102,6 +99,17 @@ class LogRocketMCPClient:
                 f"LogRocket MCP tool {tool_name!r} is unavailable. "
                 "Check the configured project and MCP toolset."
             )
+        if not _tool_properties(tool):
+            raise LogRocketMCPError(f"LogRocket MCP tool {tool_name!r} has no input schema.")
+        return tool
+
+    def iter_tool_records(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        record_keys: tuple[str, ...],
+    ) -> Iterator[dict[str, Any]]:
+        tool = self.tool_schema(tool_name)
 
         current_arguments = dict(arguments)
         cursor_key = _cursor_argument(tool)
@@ -175,7 +183,7 @@ class LogRocketMCPClient:
             session_id = response.headers.get("Mcp-Session-Id")
             if session_id:
                 self._session_id = session_id
-            message = _parse_response(response)
+            message = _parse_response(response, request["id"])
             if isinstance(message, Mapping) and message.get("error"):
                 error = message["error"]
                 raise LogRocketMCPError(f"LogRocket MCP {method} failed: {error}")
@@ -226,11 +234,25 @@ def logrocket_source(
     if invalid or not selected:
         raise ValueError("resources must contain one or both of: sessions, issues.")
 
+    # Project scope is enforced by LogRocket's documented MCP URL, including
+    # when a tool schema omits explicit organization/project parameters.
+    if base_url == LOGROCKET_MCP_URL:
+        scope = "/".join(quote(part, safe="") for part in (organization_id, project_id))
+        toolsets = ",".join(selected)
+        base_url = f"{base_url}/{scope}?toolsets={toolsets}"
     mcp_client = client or LogRocketMCPClient(api_key, base_url=base_url, timeout=timeout)
 
     def tool_arguments(tool_name: str, filters: Mapping[str, Any] | None) -> dict[str, Any]:
         tool = mcp_client.tool_schema(tool_name)
         args = _scope_arguments(tool, organization_id, project_id)
+        properties = _tool_properties(tool)
+        unsupported = set(filters or {}) - properties.keys()
+        if unsupported:
+            raise ValueError(
+                f"LogRocket {tool_name} does not accept filters: {sorted(unsupported)}"
+            )
+        if set(filters or {}) & args.keys():
+            raise ValueError("LogRocket scope fields cannot be overridden by filters.")
         args.update(filters or {})
         _add_time_window(args, tool, start_time, end_time)
         return args
@@ -325,7 +347,7 @@ def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _parse_response(response: Any) -> Mapping[str, Any]:
+def _parse_response(response: Any, request_id: int | None = None) -> Mapping[str, Any]:
     content_type = response.headers.get("content-type", "")
     if "text/event-stream" in content_type:
         messages = []
@@ -334,6 +356,15 @@ def _parse_response(response: Any) -> Mapping[str, Any]:
                 messages.append(json.loads(line[5:].strip()))
         if not messages:
             raise LogRocketMCPError("LogRocket MCP returned an empty event stream.")
+        matching = [
+            message
+            for message in messages
+            if isinstance(message, Mapping) and message.get("id") == request_id
+        ]
+        if request_id is not None:
+            if not matching:
+                raise LogRocketMCPError("LogRocket MCP event stream omitted the request result.")
+            return matching[-1]
         return messages[-1]
     try:
         return response.json()
@@ -413,12 +444,13 @@ def _scope_arguments(
         ),
         None,
     )
-    if not organization_key or not project_key:
-        raise LogRocketMCPError(
-            f"LogRocket MCP tool {tool.get('name', '<unknown>')} does not advertise "
-            "organization and project scope fields."
-        )
-    return {organization_key: organization_id, project_key: project_id}
+    # Project-scoped MCP URLs need no scope arguments; the tools may omit them.
+    arguments = {}
+    if organization_key:
+        arguments[organization_key] = organization_id
+    if project_key:
+        arguments[project_key] = project_id
+    return arguments
 
 
 def _add_time_window(

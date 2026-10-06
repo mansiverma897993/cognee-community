@@ -11,10 +11,13 @@ replays are not downloaded or stored.
 - A Cognee release with document-mode ingestion (`cognee==1.6.2` is used by this package).
 - An `LLM_API_KEY` for Cognee's normal `remember`/`cognify` flow.
 
-The connector uses `https://mcp.logrocket.com/mcp` and the documented `find_sessions`
-and `find_issues` MCP tools. LogRocket's MCP tool schemas are actively developed;
+The connector uses LogRocket's project-scoped MCP URL,
+`https://mcp.logrocket.com/mcp/<org>/<project>?toolsets=sessions,issues`, and
+the documented `find_sessions` and `find_issues` tools. The toolset is narrowed
+to the selected resources. LogRocket's MCP tool schemas are actively developed;
 the connector validates the live schema during initialization instead of assuming
-undocumented REST endpoints.
+undocumented REST endpoints. If you supply a custom `base_url`, scope it to the
+intended project yourself.
 
 ## Install
 

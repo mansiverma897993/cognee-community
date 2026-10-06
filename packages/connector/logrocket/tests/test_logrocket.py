@@ -101,6 +101,79 @@ def test_mcp_handshake_auth_and_pagination():
     assert transport.requests[-1][2]["params"]["arguments"]["cursor"] == "next-1"
 
 
+def test_source_uses_real_mcp_client_and_project_scoped_url(tmp_path, monkeypatch):
+    dlt = pytest.importorskip("dlt")
+    from cognee_community_connector_logrocket import logrocket_source
+
+    class ProjectScopedHTTP(FakeHTTPClient):
+        def post(self, url, *, headers, json):
+            response = super().post(url, headers=headers, json=json)
+            if json["method"] == "tools/list":
+                for tool in response._payload["result"]["tools"]:
+                    tool["inputSchema"]["properties"].pop("organizationId")
+                    tool["inputSchema"]["properties"].pop("projectId")
+            return response
+
+    transport = ProjectScopedHTTP()
+    monkeypatch.setattr(
+        "cognee_community_connector_logrocket.logrocket.httpx.Client",
+        lambda **kwargs: transport,
+    )
+    pipeline = dlt.pipeline(
+        pipeline_name="logrocket_project_scope_test",
+        destination=dlt.destinations.sqlalchemy(f"sqlite:///{tmp_path / 'logrocket.sqlite'}"),
+        dataset_name="logrocket_dataset",
+        pipelines_dir=str(tmp_path / "state"),
+    )
+    pipeline.run(
+        logrocket_source(
+            api_key="secret",
+            organization_id="org",
+            project_id="project",
+            resources=("issues",),
+        )
+    )
+
+    with (
+        pipeline.sql_client() as client,
+        client.execute_query("SELECT id FROM logrocket_issues") as cursor,
+    ):
+        assert cursor.fetchall() == [("org/project/issue/i1",)]
+    assert transport.requests[0][0].endswith("/org/project?toolsets=issues")
+    assert transport.requests[-1][2]["params"]["arguments"] == {}
+
+
+def test_missing_tool_fails_before_call():
+    transport = FakeHTTPClient()
+    client = LogRocketMCPClient("secret", http_client=transport)
+    with pytest.raises(LogRocketMCPError, match="unavailable"):
+        client.tool_schema("missing")
+    assert all(request[2]["method"] != "tools/call" for request in transport.requests)
+
+
+def test_scope_filter_cannot_override_project(tmp_path):
+    dlt = pytest.importorskip("dlt")
+    from cognee_community_connector_logrocket import logrocket_source
+
+    pipeline = dlt.pipeline(
+        pipeline_name="logrocket_scope_override_test",
+        destination=dlt.destinations.sqlalchemy(f"sqlite:///{tmp_path / 'logrocket.sqlite'}"),
+        dataset_name="logrocket_dataset",
+        pipelines_dir=str(tmp_path / "state"),
+    )
+    with pytest.raises(Exception, match="scope fields cannot be overridden"):
+        pipeline.run(
+            logrocket_source(
+                api_key="secret",
+                organization_id="org",
+                project_id="project",
+                resources=("issues",),
+                issue_filters={"projectId": "other"},
+                client=FakeSourceClient(),
+            )
+        )
+
+
 def test_sse_response_uses_last_json_message():
     response = FakeResponse(
         headers={"content-type": "text/event-stream"},
@@ -108,6 +181,9 @@ def test_sse_response_uses_last_json_message():
         'event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"ok":true}}\n\n',
     )
     assert _parse_response(response)["id"] == 2
+    assert _parse_response(response, request_id=1)["id"] == 1
+    with pytest.raises(LogRocketMCPError, match="omitted the request result"):
+        _parse_response(response, request_id=3)
 
 
 def test_mcp_tool_error_is_raised():
